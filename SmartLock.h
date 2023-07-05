@@ -1,4 +1,6 @@
 #pragma once
+//#pragma pack(1)
+#include<string>
 #include<arpa/inet.h>
 #include <stdlib.h>
 #include<stdio.h>
@@ -17,11 +19,12 @@
 #include<assert.h>
 #include<sys/epoll.h>
 #include<pthread.h>
+#include"mysql.h"
 
+using namespace std;
 
 typedef struct sockaddr SA;
 
-#define NULL nullptr
 #define MAX_SIZE 1024*1024
 #define MAX_LINE 1024
 #define LISTENQ 5
@@ -32,6 +35,7 @@ typedef struct sockaddr SA;
 #define FDLIMIT 65535
 #define SEND_STATE 0
 #define RECV_STATE 0
+#define MAX_USER_COUNT 5 
 
 //reportType
 #define IMAGE char(1 << 0)
@@ -41,8 +45,8 @@ typedef struct sockaddr SA;
 #define LOCK_STATE char(1 << 3)
 #define PWD_CHANGE_RESULT char(1 << 4)
 
-#define LOCKED char(1)
-#define UNLOCKED char(2)
+#define LOCKED char(0)
+#define UNLOCKED char(1)
 //返回修改管理员密码结果
 #define SUCCESS char(1)
 #define ORI_PWD_WRONG char(2)
@@ -66,39 +70,58 @@ typedef struct _report {
     char buf[128];
 }report;
 
+typedef struct _fds {
+    int epollfd;
+    int udpfd;
+}fds;
+
 
 typedef struct _client_data {
     int epollfd;
     int sockfd;
-    int stmfd;
     int udpfd;
+    MYDB* dbhandle;
     struct sockaddr_in address;
     char buf[BUFFER_SIZE];
 }client_data;
 
-void getTimeStamp(char *timeStamp);
+void getTimeStamp(client_data* user_data,char *timeStamp);
 
 void sig_chld(int signo);
 
-int parse_header(report* r,char* filename,char* timeStamp);
+int parse_header(client_data* user_data, report* r,char* filename,char* timeStamp);
 
-void doit_image(int epollfd,int fd,int filefd,int filesize,char* filepath,char* timeStamp);
+ssize_t rio_writen(int fd, void* usrbuf, socklen_t n);
 
-void doit_person(int epollfd,int filefd, int sockfd);
+void doit_image(client_data* user_data, int epollfd,int fd,int filefd,int filesize,char* filepath,char* timeStamp);
 
-void doit_longstay(int epollfd,int filefd, int sockfd);
+void doit_person(client_data* user_data, int epollfd,int filefd, int sockfd, report* rpt);
 
-void doit_lockstate(int epollfd, int sockfd);
+void doit_longstay(client_data* user_data, int epollfd,int filefd, int sockfd,char* recvline, report* rpt);
 
-void doit_pwd_change_result(int epollfd, int filefd, int sockfd);
+void doit_lockstate(client_data* user_data, int epollfd, int sockfd,report* rpt);
 
-void doit_unlock_msg(int epollfd, int filefd, int sockfd);
+void doit_pwd_change_result(client_data* user_data, int epollfd, int filefd, int sockfd, report* rpt);
 
-void doit_try_open(int epollfd, int filefd, int sockfd);
+void doit_unlock_msg(client_data* user_data, int epollfd, int filefd, int sockfd,char* recvline);
 
-void doit_open_camera(client_data* user_data);
+void doit_try_open(client_data* user_data, int epollfd, int filefd, int sockfd, report* rpt);
+
+void doit_open_camera(client_data* user_data, report* rpt);
+
+void doit_close_camera(client_data* user_data, report* rpt);
 
 void doit_pwd_change(client_data* user_data,report* rpt);
+
+void forward_to_app(char* sendMsg);
+
+int forward_to_stm(char* sendMsg);
+
+void close_fd(int sockfd);
+
+void* send_udp_data(void* arg);
+
+void send_image_to_app(client_data* user_data, char* filename, char* filepath);
 
 int setnonblocking(int fd);
 

@@ -20,7 +20,6 @@
 
 typedef struct sockaddr SA;
 
-#define NULL nullptr
 #define MAX_SIZE 1024*1024
 #define MAX_LINE 1024
 #define LISTENQ 5

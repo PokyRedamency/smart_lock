@@ -1,0 +1,1 @@
+g++ -o "/root/projects/SmartLock/bin/x64/Debug/SmartLock.out" -Wl,--no-undefined -Wl,-L"/root/projects/SmartLock/../../../../../Program Files (x86)/Microsoft Visual Studio/2019/Community/Common7/IDE/VC/Linux/include/usr/lib" -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack /root/projects/SmartLock/obj/x64/Debug/main.o /root/projects/SmartLock/obj/x64/Debug/SmartLock.o -lpthread

@@ -12,10 +12,13 @@ int MYDB::mydb_mysql_real_connect() {
 }
 
 int MYDB::mydb_mysql_query(const char* sql) {
+    // 执行数据库操作
     if (mysql_query(this->mysql, sql) != 0) {
+        unlock_mutex(this->db_mutex);
         return -1;
     }
     this->res = mysql_store_result(this->mysql);
+
     return 0;
 }
 

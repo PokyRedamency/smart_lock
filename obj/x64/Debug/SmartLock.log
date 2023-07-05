@@ -1,0 +1,37 @@
+﻿  正在验证源
+  正在将源远程复制到“119.8.37.34”
+  正在验证体系结构
+  正在验证体系结构
+  正在启动远程生成
+  正在编译源:
+  SmartLock.cpp
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(61,9): warning : conversion from ‘ssize_t’ {aka ‘long int’} to ‘socklen_t’ {aka ‘unsigned int’} may change value [-Wconversion]
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(61,9): warning :    nleft -= nwritten;
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(61,9): warning :    ~~~~~~^~~~~~~~~~~
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(155,17): warning : conversion from ‘ssize_t’ {aka ‘long int’} to ‘int’ may change value [-Wconversion]
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(155,17): warning :    int ret = recv(sockfd, recvline, readsize, 0);
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(155,17): warning :              ~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(289,7): warning : unused variable ‘recvline’ [-Wunused-variable]
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(289,7): warning :   char recvline[BUFFER_SIZE];
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(289,7): warning :        ^~~~~~~~
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(318,7): warning : unused variable ‘recvline’ [-Wunused-variable]
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(318,7): warning :   char recvline[BUFFER_SIZE];
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(318,7): warning :        ^~~~~~~~
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(361,13): warning : conversion from ‘ssize_t’ {aka ‘long int’} to ‘int’ may change value [-Wconversion]
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(361,13): warning :   return send(stmfd, sendMsg, sizeof(report), 0);
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(361,13): warning :          ~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(372,15): warning : conversion from ‘ssize_t’ {aka ‘long int’} to ‘int’ may change value [-Wconversion]
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(372,15): warning :    n = recvfrom(udpfd, buf, BUFFER_SIZE - 1, 0, NULL, NULL);
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(372,15): warning :        ~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(401,19): warning : conversion from ‘__off_t’ {aka ‘long int’} to ‘int’ may change value [-Wconversion]
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(401,19): warning :    filesize = sbuf.st_size;
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(401,19): warning :               ~~~~~^~~~~~~
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(451,18): warning : conversion from ‘ssize_t’ {aka ‘long int’} to ‘int’ may change value [-Wconversion]
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(451,18): warning :     int ret = recv(sockfd, ((char*)&rpt) + readn, bytesToReceive - readn, 0);
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(451,18): warning :               ~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(435,8): warning : unused variable ‘mydb’ [-Wunused-variable]
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(435,8): warning :   MYDB* mydb = user_data->dbhandle;
+C:\Users\86189\source\repos\SmartLock\SmartLock.cpp(435,8): warning :         ^~~~
+  正在链接对象
+/usr/bin/ld : error : cannot find -lmysqlclient
+collect2 : error : ld returned 1 exit status

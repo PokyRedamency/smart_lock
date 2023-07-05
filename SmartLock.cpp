@@ -1,7 +1,12 @@
 #include "SmartLock.h"
-#include "mysql.h"
 
-MYDB mydb;
+
+extern int user_fds[MAX_USER_COUNT];
+extern struct sockaddr_in user_addrs_open_camera[MAX_USER_COUNT];
+extern int stmfd;
+extern int sendingImage;
+extern int camera_is_open;
+extern int sending_lock_state;
 
 int setnonblocking(int fd) {
 	int oldoption = fcntl(fd, F_GETFL);
@@ -10,7 +15,7 @@ int setnonblocking(int fd) {
 	return oldoption;
 }
 
-void addfd(int epollfd, int fd,bool oneshot) {
+void addfd(int epollfd, int fd, bool oneshot) {
 	epoll_event event;
 	event.data.fd = fd;
 	event.events = EPOLLIN | EPOLLET;
@@ -28,18 +33,41 @@ void reset_oneshot(int epollfd, int fd) {
 	epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event);
 }
 
-void getTimeStamp(char* timeStamp) {
-	mydb.mydb_mysql_query("select now()");
-	MYSQL_ROW row = mysql_fetch_row(mydb.res);
+void getTimeStamp(client_data* user_data, char* timeStamp) {
+	MYDB* mydb = user_data->dbhandle;
+	// 获得互斥锁的锁
+	lock_mutex(user_data->dbhandle->db_mutex);
+	mydb->mydb_mysql_query("select now()");
+	MYSQL_ROW row = mysql_fetch_row(mydb->res);
 	sprintf(timeStamp, "%s", row[0]);
+	// 处理完数据库操作和结果存储后，释放互斥锁的锁
+	unlock_mutex(user_data->dbhandle->db_mutex);
 }
 
-int parse_header(report* r, char* filename,char* timeStamp) {
+ssize_t rio_writen(int fd, void* usrbuf, socklen_t n) {
+	socklen_t nleft = n;
+	ssize_t nwritten;
+	char* bufp = (char*)usrbuf;
+
+	while (nleft > 0) {
+		if ((nwritten = send(fd, bufp, nleft, 0)) <= 0) {
+			if (errno == EINTR)
+				nwritten = 0;
+			else
+				return -1;
+		}
+		nleft -= nwritten;
+		bufp += nwritten;
+	}
+	return n;
+}
+
+int parse_header(client_data* user_data, report* r, char* filename, char* timeStamp) {
 	int filefd;
 	char type = r->reportType;
 	switch (type) {
 	case IMAGE: {
-		getTimeStamp(timeStamp);
+		getTimeStamp(user_data,timeStamp);
 		sprintf(filename, "%s", "/LL/SmartLock/image/");
 		strcat(filename, timeStamp);
 		strcat(filename, ".jpeg");
@@ -84,32 +112,50 @@ int parse_header(report* r, char* filename,char* timeStamp) {
 		sprintf(filename, "%s", "PWD_CHANGE......");
 		break;
 	}
+	case LOCK_STATE: {
+		sprintf(filename, "%s", "LOCK_STATE......");
+		break;
+	}
+	case LOCK_CONTROL: {
+		sprintf(filename, "%s", "LOCK_CONTROL......");
+		break;
+	}
+	case GET_IMAGE: {
+		sprintf(filename, "%s", "GET_IMAGE......");
+		break;
+	}
 	default: {
+		sprintf(filename, "%s", "UNKNOWN_TYPE......");
 		break;
 	}
 	}
 	return filefd;
 }
 
-void doit_image(int epollfd,int sockfd,int filefd,int filesize,char* filepath,char* timeStamp) {
+void doit_image(client_data* user_data, int epollfd, int sockfd, int filefd, int filesize, char* filepath, char* timeStamp) {
 	int readsize;
-	char recvline[RIO_BUFSIZE];
-	char* sql;
+	char recvline[BUFFER_SIZE];
+	char* sql = (char*)malloc(BUFFER_SIZE);
+	MYDB* mydb = user_data->dbhandle;
+	// 获得互斥锁的锁
+	lock_mutex(user_data->dbhandle->db_mutex);
 	sprintf(sql, "insert into images values('%s','%s')", timeStamp, filepath);
-	mydb.mydb_mysql_query(sql);
-	while (filesize > 0) {
+	mydb->mydb_mysql_query(sql);
+	// 处理完数据库操作和结果存储后，释放互斥锁的锁
+	unlock_mutex(user_data->dbhandle->db_mutex);
+	while (filesize) {
 		memset(recvline, '\0', sizeof(recvline));
-		if (filesize > RIO_BUFSIZE) readsize = RIO_BUFSIZE;
+		if (filesize > BUFFER_SIZE - 1) readsize = BUFFER_SIZE - 1;
 		else readsize = filesize;
 		int ret = recv(sockfd, recvline, readsize, 0);
 		if (ret < 0) {
-			if (errno == EINTR||errno == EAGAIN) {
+			if (errno == EINTR || errno == EAGAIN) {
 				continue;
 			}
 			else {
 				printf("errno is: %d\n", errno);
-				close(sockfd);
 				printf("recv failure\n");
+				close(sockfd);
 				break;
 			}
 		}
@@ -121,299 +167,355 @@ void doit_image(int epollfd,int sockfd,int filefd,int filesize,char* filepath,ch
 		write(filefd, recvline, ret);
 		filesize -= ret;
 	}
-	if (filesize == 0) reset_oneshot(epollfd, sockfd);
+	send_image_to_app(user_data, timeStamp, filepath);
+	free(sql);
 }
 
-void doit_person(int epollfd,int filefd,int sockfd) {
+void doit_person(client_data* user_data, int epollfd, int filefd, int sockfd, report* rpt) {
+	//forward_to_app((char*)rpt);
 	char writeline[MAX_LINE];
-	getTimeStamp(writeline);
+	getTimeStamp(user_data,writeline);
 	strcat(writeline, " Person\n");
 	write(filefd, writeline, strlen(writeline));
-	reset_oneshot(epollfd, sockfd);
 }
 
-void doit_longstay(int epollfd,int filefd, int sockfd) {
+void doit_longstay(client_data* user_data, int epollfd, int filefd, int sockfd, char* recvline, report* rpt) {
+	//forward_to_app((char*)rpt);
+	char writeline[BUFFER_SIZE];
 	char buf[BUFFER_SIZE];
-	char writeline[MAX_LINE];
+	memset(writeline, '\0', BUFFER_SIZE);
 	memset(buf, '\0', BUFFER_SIZE);
-	memset(writeline, '\0', MAX_LINE);
-	getTimeStamp(writeline);
-	for (int i = 1; i > 0;) {
-		int ret = recv(sockfd, buf, 1, 0);
-		if (ret < 0) {
-			if (errno == EINTR || errno == EAGAIN) {
-				continue;
-			}
-			else {
-				close(sockfd);
-				printf("recv failure\n");
-				break;
-			}
-		}
-		else if (ret == 0) {
-			close(sockfd);
-			printf("The client is disconnected\n");
-			break;
-		}
-		strcat(writeline, " LongStay ");
-		strcat(writeline, buf);
-		strcat(writeline, "s\n");
+	getTimeStamp(user_data,writeline);
+	strcat(writeline, " LongStay ");
+	sprintf(buf, "%d", recvline[0]);
+	strcat(writeline, buf);
+	strcat(writeline, "s\n");
+	write(filefd, writeline, strlen(writeline));
+}
+
+void doit_lockstate(client_data* user_data, int epollfd, int sockfd, report* rpt) {
+	sending_lock_state++;
+	forward_to_app((char*)rpt);
+	sending_lock_state--;
+	char* recvline = rpt->buf;
+	MYDB* mydb = user_data->dbhandle;
+
+	if (recvline[0] == LOCKED) {
+		// 获得互斥锁的锁
+		lock_mutex(user_data->dbhandle->db_mutex);
+		printf("lock_mutex...\n");
+		mydb->mydb_mysql_query("update smart_lock set LOCK_STATE = 'LOCKED'");
+		// 处理完数据库操作和结果存储后，释放互斥锁的锁
+		unlock_mutex(user_data->dbhandle->db_mutex);
+		printf("unlock_mutex...\n");
+	}
+	else if (recvline[0] == UNLOCKED) {
+		// 获得互斥锁的锁
+		lock_mutex(user_data->dbhandle->db_mutex);
+		printf("lock_mutex...\n");
+		mydb->mydb_mysql_query("update smart_lock set LOCK_STATE = 'UNLOCKED'");
+		// 处理完数据库操作和结果存储后，释放互斥锁的锁
+		unlock_mutex(user_data->dbhandle->db_mutex);
+		printf("unlock_mutex...\n");
+	}
+	else {
+		printf("recvline = %s\n", recvline);
+		printf("I do not know this LockState\n");
+	}
+}
+
+void doit_pwd_change_result(client_data* user_data, int epollfd, int filefd, int sockfd, report* rpt) {
+	forward_to_app((char*)rpt);
+	char writeline[MAX_LINE];
+	char* recvline = rpt->buf;
+	getTimeStamp(user_data, writeline);
+	if (recvline[0] == SUCCESS) {
+		strcat(writeline, " SUCCESS\n");
 		write(filefd, writeline, strlen(writeline));
-		reset_oneshot(epollfd, sockfd);
-		i--;
+	}
+	else if (recvline[0] == ORI_PWD_WRONG) {
+		strcat(writeline, " ORI_PWD_WRONG\n");
+		write(filefd, writeline, strlen(writeline));
+	}
+	else if (recvline[0] == OTHER) {
+		strcat(writeline, " OTHER\n");
+		write(filefd, writeline, strlen(writeline));
+	}
+	else {
+		printf("I do not know this pwd_change_result\n");
 	}
 }
 
-void doit_lockstate(int epollfd, int sockfd) {
-	char recvline[MAX_LINE];
-	for (int i = 1; i > 0;) {
-		memset(recvline, '\0', MAX_LINE);
-		int ret = recv(sockfd, recvline, 1, 0);
-		if (ret < 0) {
-			if (errno == EINTR || errno == EAGAIN) {
-				continue;
-			}
-			else {
-				close(sockfd);
-				printf("recv failure\n");
-				break;
-			}
-		}
-		else if (ret == 0) {
-			close(sockfd);
-			printf("The client is disconnected\n");
-			break;
-		}
-		if (recvline[0] == LOCKED) {
-			const char* sql = "update smart_lock set LOCK_STATE = 'LOCKED'";
-			mydb.mydb_mysql_query(sql);
-		}
-		else if (recvline[0] == UNLOCKED) {
-			const char* sql = "update smart_lock set LOCK_STATE = 'UNLOCKED'";
-			mydb.mydb_mysql_query(sql);
-		}
-		else {
-			printf("recvline = %s\n", recvline);
-			printf("I do not know this LockState\n");
-		}
-		reset_oneshot(epollfd, sockfd);
-		i--;
-	}
-}
-
-void doit_pwd_change_result(int epollfd, int filefd, int sockfd) {
-	char recvline[MAX_LINE];
-	char writeline[MAX_LINE];
-	getTimeStamp(writeline);
-	for (int i = 1; i > 0;) {
-		memset(recvline, '\0', MAX_LINE);
-		int ret = recv(sockfd, recvline, 1, 0);
-		if (ret < 0) {
-			if (errno == EINTR || errno == EAGAIN) {
-				continue;
-			}
-			else {
-				close(sockfd);
-				printf("recv failure\n");
-				break;
-			}
-		}
-		else if (ret == 0) {
-			close(sockfd);
-			printf("The client is disconnected\n");
-			break;
-		}
-		if (recvline[0] == SUCCESS) {
-			strcat(writeline, " SUCCESS\n");
-			write(filefd, writeline, strlen(writeline));
-		}
-		else if (recvline[0] == ORI_PWD_WRONG) {
-			strcat(writeline, " ORI_PWD_WRONG\n");
-			write(filefd, writeline, strlen(writeline));
-		}
-		else if (recvline[0] == OTHER) {
-			strcat(writeline, " OTHER\n");
-			write(filefd, writeline, strlen(writeline));
-		}
-		else {
-			printf("I do not know this pwd_change_result\n");
-		}
-		reset_oneshot(epollfd, sockfd);
-		i--;
-	}
-}
-
-void doit_unlock_msg(int epollfd, int filefd, int sockfd) {
-	char recvline[MAX_LINE];
+void doit_unlock_msg(client_data* user_data, int epollfd, int filefd, int sockfd, char* recvline) {
 	char writeline[MAX_LINE];
 	memset(writeline, '\0', MAX_LINE);
-	getTimeStamp(writeline);
-	for (int i = 1; i > 0;) {
-		memset(recvline, '\0', MAX_LINE);
-		int ret = recv(sockfd, recvline, MAX_LINE, 0);
-		if (ret < 0) {
-			if (errno == EINTR || errno == EAGAIN) {
-				continue;
-			}
-			else {
-				close(sockfd);
-				printf("recv failure\n");
-				break;
-			}
-		}
-		else if (ret == 0) {
-			close(sockfd);
-			printf("The client is disconnected\n");
-			break;
-		}
-		
-		if (ret > 1) {
-			strcat(writeline, " CARD_UNLOCK:");
-			strcat(writeline, recvline);
-			strcat(writeline, "\n");
-			write(filefd, writeline, strlen(writeline));
-		}
-		else if (recvline[0] == WRONG_UNLOCK) {
-			strcat(writeline, " WRONG_UNLOCK\n");
-			write(filefd, writeline, strlen(writeline));
-		}
-		else if (recvline[0] == PWD_UNLOCK) {
-			strcat(writeline, " PWD_UNLOCK\n");
-			write(filefd, writeline, strlen(writeline));
-		}
-		else {
-			printf("I do not know this unlock_msg\n");
-		}
-		reset_oneshot(epollfd, sockfd);
-		i--;
+	getTimeStamp(user_data, writeline);
+	if (strlen(recvline) > 1) {
+		strcat(writeline, " CARD_UNLOCK:");
+		strcat(writeline, recvline);
+		strcat(writeline, "\n");
+		write(filefd, writeline, strlen(writeline));
+	}
+	else if (recvline[0] == WRONG_UNLOCK) {
+		strcat(writeline, " WRONG_UNLOCK\n");
+		write(filefd, writeline, strlen(writeline));
+	}
+	else if (recvline[0] == PWD_UNLOCK) {
+		strcat(writeline, " PWD_UNLOCK\n");
+		write(filefd, writeline, strlen(writeline));
+	}
+	else {
+		printf("I do not know this unlock_msg\n");
 	}
 }
 
-void doit_try_open(int epollfd, int filefd, int sockfd) {
+void doit_try_open(client_data* user_data, int epollfd, int filefd, int sockfd,report* rpt) {
 	char writeline[MAX_LINE];
-	getTimeStamp(writeline);
+	getTimeStamp(user_data,writeline);
 	strcat(writeline, " TRY_OPEN\n");
 	write(filefd, writeline, strlen(writeline));
-	reset_oneshot(epollfd, sockfd);
 }
 
-void doit_open_camera(client_data* user_data) {
-	if (user_data->stmfd == -1) { //判断单片机连接情况 -1表示未连接
+void doit_open_camera(client_data* user_data, report* rpt) {
+	if (stmfd == -1) { //判断单片机连接情况 -1表示未连接
 		send(user_data->sockfd, "The lock is not connected!\n", 28, 0);
 		return;
 	}
-	int state = SEND_STATE;
-	report sendline;
 	char recvline[BUFFER_SIZE];
-	memset(&sendline, '\0', BUFFER_SIZE);
-	sendline.reportType = OPEN_CAMERA;
-	sendline.reportLen = 0;
-	int ret = send(user_data->stmfd, &sendline, BUFFER_SIZE, 0); //发送类型为OPEN_CAMERA的头部数据
-	while (1) {
-		if(state == SEND_STATE) { //先发送打开摄像头请求给单片机
-			if (ret < 0) {
-				send(user_data->sockfd, "Open camera failure!\n", 22, 0);
-				close(user_data->stmfd);
+	int ret = forward_to_stm((char*)rpt); //先转发打开摄像头请求给单片机
+	if (ret < 0) {
+		printf("Open camera failure!\n");
+		close(stmfd);
+
+	}
+	else if (ret == 0) {
+		printf("The lock is disconnected!\n");
+		close(stmfd);
+
+	}
+	else {
+		//请求发送成功
+		camera_is_open++;
+		for (int i = 0; i < MAX_USER_COUNT; i++) {
+			if (strncmp((char*)&user_addrs_open_camera[i], "\0", 1) == 0) {
+				user_addrs_open_camera[i] = user_data->address;
 				break;
-			}
-			else if (ret == 0) {
-				send(user_data->sockfd, "The lock is disconnected!\n", 27, 0);
-				close(user_data->stmfd);
-				break;
-			}
-			else {
-				state = RECV_STATE;//请求发送成功则下次循环state变为接收单片机传来的摄像头数据
-				continue;
-			}
-		}
-		else if(state == RECV_STATE){//接收摄像头数据并进行转发
-			memset(recvline, '\0', BUFFER_SIZE);
-			ret = recvfrom(user_data->stmfd, recvline, BUFFER_SIZE - 1, 0, NULL, NULL);//接收
-			if (ret < 0 && errno != EAGAIN || ret == 0) {
-				send(user_data->sockfd, "The lock is disconnected!\n", 27, 0);
-				close(user_data->stmfd);
-				break;
-			}
-			else {
-				sendto(user_data->udpfd, recvline, ret, 0, (SA*)&user_data->address, sizeof(user_data->address));//转发
 			}
 		}
 	}
-	reset_oneshot(user_data->epollfd, user_data->sockfd);
 }
 
-void doit_pwd_change(client_data* user_data,report* rpt){
-	int ret;
-	int rptLen = rpt->reportLen;
-	if (user_data->stmfd == -1) {
+void doit_close_camera(client_data* user_data, report* rpt) {
+	if (stmfd == -1) { //判断单片机连接情况 -1表示未连接
 		send(user_data->sockfd, "The lock is not connected!\n", 28, 0);
 		return;
 	}
+	char recvline[BUFFER_SIZE];
+	int ret = forward_to_stm((char*)rpt); //先转发关闭摄像头请求给单片机
+	if (ret < 0) {
+		printf("Open camera failure!\n");
+		close(stmfd);
+
+	}
+	else if (ret == 0) {
+		printf("The lock is disconnected!\n");
+		close(stmfd);
+
+	}
+	else {
+		//请求发送成功
+		camera_is_open--;
+		for (int i = 0; i < MAX_USER_COUNT; i++) {
+			if (strcmp((char*)&user_addrs_open_camera[i], (char*)&(user_data->address)) == 0) {
+				memset(&user_addrs_open_camera[i],'\0',sizeof(user_addrs_open_camera[i]));
+				break;
+			}
+		}
+	}
+}
+
+void doit_pwd_change(client_data* user_data, report* rpt) {
+	if (stmfd == -1) {
+		printf("The lock is not connected!\n");
+		return;
+	}
+	int ret = forward_to_stm((char*)rpt);
+	if (ret < 0) printf("forward to stm failure!\n");
 	printf("pwd: %s\n", rpt->buf);
 }
 
+void forward_to_app(char* sendMsg) {
+	for (int i = 0; i < MAX_USER_COUNT; i++) {
+		while (sendingImage);
+		if (user_fds[i] == -1) continue;
+		send(user_fds[i], sendMsg, sizeof(report), 0);
+	}
+}
+
+int forward_to_stm(char* sendMsg) {
+	return send(stmfd, sendMsg, sizeof(report), 0);
+}
+
+void* send_udp_data(void* arg) {
+	int epollfd = ((fds*)arg)->epollfd;
+	int udpfd = ((fds*)arg)->udpfd;
+	printf("start new thread for udpfd: %d\n", udpfd);
+	char buf[BUFFER_SIZE];
+	int n;
+	while (camera_is_open) {
+		memset(buf, '\0', sizeof(buf));
+		n = recvfrom(udpfd, buf, BUFFER_SIZE - 1, 0, NULL, NULL);
+		if (n <= 0) continue;
+		printf("udp buf :%s\n", buf);
+		for (int i = 0; i < MAX_USER_COUNT; i++) {
+			if (strncmp((char*)&user_addrs_open_camera[i], "\0", 1) == 0) continue;
+			printf("send_udp_data for %d\n", udpfd);
+			sendto(udpfd, buf, BUFFER_SIZE, 0, (SA*)&user_addrs_open_camera[i], sizeof(SA));
+		}
+	}
+	
+	printf("end thread for udpfd: %d\n", udpfd);
+	reset_oneshot(epollfd, udpfd);
+	return NULL;
+}
+
+void send_image_to_app(client_data* user_data, char* filename,char* filepath) {
+	int srcfd;
+	int filesize;
+	struct stat sbuf;
+	char* srcp;
+	report rpt;
+	for (int i = 0; i < MAX_USER_COUNT; i++) {
+		if (user_fds[i] == -1) continue;
+		while (sending_lock_state);
+		sendingImage++;
+		memset(&rpt, '\0', sizeof(rpt));
+		rpt.reportType = IMAGE;
+		sprintf(rpt.buf, "%s", filename);
+		stat(filepath, &sbuf);
+		filesize = sbuf.st_size;
+		rpt.reportLen = filesize;
+		srcfd = open(filepath, O_RDONLY, 0777);
+		srcp = (char*)mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+		close(srcfd);
+		send(user_fds[i], &rpt, sizeof(rpt), 0);
+		rio_writen(user_fds[i], srcp, filesize);
+		munmap(srcp, filesize);
+		sendingImage--;
+	}
+}
+
+void close_fd(int sockfd) {
+	close(sockfd);
+	if (sockfd == stmfd) {
+		stmfd = -1;
+		return;
+	}
+	for (int i = 0; i < MAX_USER_COUNT; i++) {
+		if (user_fds[i] == sockfd) {
+			user_fds[i] = -1;
+			break;
+		}
+	}
+	return;
+}
 
 void* worker(void* arg) {
-	int sockfd = ((client_data*)arg)->sockfd;
-	int epollfd = ((client_data*)arg)->epollfd;
+	client_data* user_data = (client_data*)arg;
+	int sockfd = user_data->sockfd;
+	int epollfd = user_data->epollfd;
 	printf("start new thread to receive data on fd: %d\n", sockfd);
+	MYDB* mydb = user_data->dbhandle;
 
-	mydb.mydb_mysql_init();
-	if (mydb.mydb_mysql_real_connect() == -1) {
-		printf("connect to mysql failed!\n");
-	}
-
-	char filepath[MAX_LINE];
-	char timeStamp[MAX_LINE];
+	char filepath[BUFFER_SIZE];
+	char timeStamp[BUFFER_SIZE];
 	report rpt;
 	int filefd;
-	int readn = 0;
+	size_t readn = 0;
+	size_t bytesToReceive = sizeof(rpt);
 	int filesize;
-	//读取头部信息
-	readn = recv(sockfd, &rpt, sizeof(rpt), 0);
-	printf("%d\n", readn);
-	filesize = rpt.reportLen;
-	if (readn == 0) {
-		close(sockfd);
-		printf("The client is disconnected\n");
-	}
-	else {
-		filefd = parse_header(&rpt, filepath,timeStamp);
-		printf("filepath: %s\nfilesize: %d\n", filepath, filesize);
+	//接收数据
+	while (1) {
+		memset(filepath, '\0', BUFFER_SIZE);
+		memset(timeStamp, '\0', BUFFER_SIZE);
+		memset(&rpt, '\0', sizeof(rpt));
+		readn = 0;
+		while (readn < bytesToReceive) {
+			int ret = recv(sockfd, ((char*)&rpt) + readn, bytesToReceive - readn, 0);
+			if (ret == -1) {
+				if (errno == EINTR || errno == EAGAIN) continue;
+				printf("recv failure!\n");
+				close_fd(sockfd);
+				break;
+			}
+			else if (ret == 0) {
+				printf("The client is disconnected!\n");
+				close_fd(sockfd);
+				return 0;
+			}
+			else {
+				readn += ret;
+			}
+		}
+		filesize = rpt.reportLen;
+
+		filefd = parse_header(user_data,&rpt, filepath, timeStamp);
+		//printf("filepath: %s\nfilesize: %d\n", filepath, filesize);
 		switch (rpt.reportType) {
 		case IMAGE:
-			doit_image(epollfd, sockfd, filefd, filesize, filepath,timeStamp);
+			doit_image(user_data,epollfd, sockfd, filefd, filesize, filepath, timeStamp);
 			break;
 		case PERSON:
-			doit_person(epollfd, filefd, sockfd);
+			doit_person(user_data, epollfd, filefd, sockfd,&rpt);
 			break;
 		case LONG_STAY:
-			doit_longstay(epollfd, filefd, sockfd);
+			doit_longstay(user_data, epollfd, filefd, sockfd, rpt.buf,&rpt);
 			break;
 		case LOCK_STATE:
-			doit_lockstate(epollfd, sockfd);
+			doit_lockstate(user_data, epollfd, sockfd, &rpt);
 			break;
 		case PWD_CHANGE_RESULT:
-			doit_pwd_change_result(epollfd, filefd, sockfd);
+			doit_pwd_change_result(user_data, epollfd, filefd, sockfd,&rpt);
 			break;
 		case UNLOCK_MSG:
-			doit_unlock_msg(epollfd, filefd, sockfd);
+			doit_unlock_msg(user_data, epollfd, filefd, sockfd, rpt.buf);
 			break;
 		case TRY_OPEN:
-			doit_try_open(epollfd, filefd, sockfd);
+			doit_try_open(user_data, epollfd, filefd, sockfd,&rpt);
 			break;
 		case OPEN_CAMERA:
-			doit_open_camera((client_data*)arg);
+			doit_open_camera(user_data, &rpt);
+			break;
+		case CLOSE_CAMERA:
+			doit_close_camera(user_data, &rpt);
 			break;
 		case PWD_CHANGE:
-			doit_pwd_change((client_data*)arg, &rpt);
+			doit_pwd_change(user_data, &rpt);
 			break;
+		case LOCK_CONTROL:
+			forward_to_stm((char*)&rpt);
+			break;
+		case GET_IMAGE: {
+			/*string s = rpt.buf;
+			int pos = s.find('&');
+			if (pos != string::npos) {
+				sprintf(startTime, "%s", s.substr(0, pos).c_str());
+				sprintf(endTime, "%s", s.substr(pos + 1).c_str());
+				printf("startTime: %s endTime: %s\n", startTime, endTime);
+			}
+			send_image_to_app((client_data*)arg, startTime, endTime);*/
+			break;
+		}
 		default:
-			close(sockfd);
+			close_fd(sockfd);
 			printf("I do not know this flag\n");
-			break;
+			reset_oneshot(epollfd, sockfd);
+			printf("end thread to receive data on fd: %d\n", sockfd);
+			return NULL;
 		}
 		close(filefd);
 	}
+	reset_oneshot(epollfd, sockfd);
 	printf("end thread to receive data on fd: %d\n", sockfd);
+	return NULL;
 }
